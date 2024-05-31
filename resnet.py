@@ -442,6 +442,15 @@ class ResNet18(nn.Module):
             elif isinstance(module,  nn.BatchNorm2d):
                 nowd_params += list(module.parameters())
         return wd_params, nowd_params
+    
+
+    if __name__ == "__main__":
+        res = resnet18(pretrained=True)
+        x = torch.randn(1,3,256,256)
+        f= res(x)
+        print(f.shape)
+        
+
 
 
 

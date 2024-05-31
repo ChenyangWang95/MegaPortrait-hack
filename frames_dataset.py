@@ -187,12 +187,12 @@ class FramesDataset(Dataset):
         if self.is_train:
             source = video_array_trans[0]
             driving = video_array_trans[1]
-            random_source = video_array_trans_rand[0]
+            # random_source = video_array_trans_rand[0]
             random_driving = video_array_trans_rand[1]
             
             out['driving'] = driving
             out['source'] = source
-            out['random_source'] = random_source
+            # out['random_source'] = random_source
             out['random_driving'] = random_driving
 
             # out['driving'] = driving.transpose((2, 0, 1))

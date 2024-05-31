@@ -1052,8 +1052,9 @@ import matplotlib.pyplot as plt
 
 
 class Gbase(nn.Module):
-    def __init__(self):
+    def __init__(self, is_train=False):
         super(Gbase, self).__init__()
+        self.is_train = is_train
         self.appearanceEncoder = Eapp()
         self.motionEncoder = Emtn()
         self.warp_generator_s2c = WarpGeneratorS2C(num_channels=512) # source-to-canonical
@@ -1061,10 +1062,34 @@ class Gbase(nn.Module):
         self.G3d = G3d(in_channels=96)
         self.G2d = G2d(in_channels=96)
 
+    def trans_for_loss(self, att_s, att_d):
+        vs, es, Rs, ts, zs = att_s
+        vd, ed, Rd, td, zd = att_d
+
+        # D(vd, ed, Rs, ts, zd)        
+        w_s2c1 = self.warp_generator_s2c(Rs, ts, zd, ed)
+        vc1 = apply_warping_field(vd, w_s2c1)
+        vc2d1 = self.G3d(vc1)
+        w_c2d1 = self.warp_generator_c2d(Rd, td, zd, ed)
+        vc2d_warped1 = apply_warping_field(vc2d1, w_c2d1)
+        vc2d_projected = torch.sum(vc2d_warped1, dim=2)
+        xhat1 = self.G2d(vc2d_projected)
+
+        # D(vs, es, Rs, ts, zd)
+        w_s2c2 = self.warp_generator_s2c(Rs, ts, zd, es)
+        vc2 = apply_warping_field(vs, w_s2c2)
+        vc2d2 = self.G3d(vc2)
+        w_c2d2 = self.warp_generator_c2d(Rs, ts, zd, es)
+        vc2d_warped2 = apply_warping_field(vc2d2, w_c2d2)
+        vc2d_projected2 = torch.sum(vc2d_warped2, dim=2)
+        xhat2 = self.G2d(vc2d_projected2)
+
+        return xhat1, xhat2
+
 #    @profile
-    def forward(self, xs, xd):
+    def forward(self, xs, xd, same_subject=True):
         vs, es = self.appearanceEncoder(xs)
-   
+        vd, ed = self.appearanceEncoder(xd)
         # The motionEncoder outputs head rotations R𝑠/𝑑 ,translations t𝑠/𝑑 , and latent expression descriptors z𝑠/𝑑
         Rs, ts, zs = self.motionEncoder(xs)
         Rd, td, zd = self.motionEncoder(xd)
@@ -1098,6 +1123,11 @@ class Gbase(nn.Module):
         # Pass projected features through G2d to obtain the final output image (xhat)
         xhat = self.G2d(vc2d_projected)
 
+        if self.is_train and same_subject:
+            img1, img2 = self.trans_for_loss([vs, es, Rs, ts, zs], [vd, ed, Rd, td, zd])
+
+            return xhat, img1, img2
+        
         #self.visualize_warp_fields(xs, xd, w_s2c, w_c2d, Rs, ts, Rd, td)
         return xhat
 
@@ -1910,6 +1940,18 @@ class PerceptualLoss(nn.Module):
         return (x - mean) / std
 
 
+
+class CosSimLoss(nn.Module):
+    def __init__(self):
+        super(CosSimLoss, self).__init__()
+        self.resnet = resnet18(pretrained=True).cuda()
+        self.certion = nn.CosineSimilarity(dim=1)
+
+    def forward(self, img1, img2):
+        feature1 = self.resnet(img1)
+        feature2 = self.resnet(img2)
+        loss = 1 - self.certion(feature1, feature2)
+        return loss.mean()
 
 
 '''
