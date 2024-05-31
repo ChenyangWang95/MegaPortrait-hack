@@ -33,7 +33,7 @@ __all__ = [
     "resnet34",
     "resnet50",
 ]
-weights_downloaded = False
+weights_downloaded = True
 
 
 
@@ -292,7 +292,7 @@ def _resnet(arch, block, layers, pretrained, progress, device, **kwargs):
             weights_downloaded = True
         
         script_dir = os.path.dirname(__file__)
-        state_dict_path = os.path.join(script_dir, "cifar10_models/state_dicts", arch + ".pt")
+        state_dict_path = os.path.join(script_dir, "checkpoints/state_dicts", arch + ".pt")
         if os.path.isfile(state_dict_path):
             state_dict = torch.load(state_dict_path, map_location=device)
             model.load_state_dict(state_dict)

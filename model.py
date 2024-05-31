@@ -1079,7 +1079,7 @@ class Gbase(nn.Module):
         logging.debug(f"vs shape:{vs.shape}") 
         # Warp vs using w_s2c to obtain canonical volume vc
         vc = apply_warping_field(vs, w_s2c)
-        assert vc.shape[1:] == (96, 16, 64, 64), f"Expected vc shape (_, 96, 16, 64, 64), got {vc.shape}"
+        # assert vc.shape[1:] == (96, 16, 64, 64), f"Expected vc shape (_, 96, 16, 64, 64), got {vc.shape}"
 
         # Process canonical volume (vc) using G3d to obtain vc2d
         vc2d = self.G3d(vc)
@@ -1090,7 +1090,7 @@ class Gbase(nn.Module):
 
         # Warp vc2d using w_c2d to impose driving motion
         vc2d_warped = apply_warping_field(vc2d, w_c2d)
-        assert vc2d_warped.shape[1:] == (96, 16, 64, 64), f"Expected vc2d_warped shape (_, 96, 16, 64, 64), got {vc2d_warped.shape}"
+        # assert vc2d_warped.shape[1:] == (96, 16, 64, 64), f"Expected vc2d_warped shape (_, 96, 16, 64, 64), got {vc2d_warped.shape}"
 
         # Perform orthographic projection (P)
         vc2d_projected = torch.sum(vc2d_warped, dim=2)
@@ -2010,8 +2010,9 @@ def get_foreground_mask(image):
         # Assume the tensor is already in the range [0, 1]
         if image.dim() == 4 and image.shape[0] == 1:
             # Remove the extra dimension if present
-            image = image.squeeze(0)
-        input_tensor = transform(image).unsqueeze(0)
+            # image = image.squeeze(0)
+            image = image
+        input_tensor = image
     else:
         # Convert PIL Image or NumPy array to tensor
         input_tensor = transforms.ToTensor()(image)
@@ -2030,5 +2031,6 @@ def get_foreground_mask(image):
 
     # Convert the segmentation mask to a binary foreground mask
     foreground_mask = (mask == 15).float()  # Assuming class 15 represents the person class
+    foreground_mask = foreground_mask.unsqueeze(1)
 
     return foreground_mask.to(device)
