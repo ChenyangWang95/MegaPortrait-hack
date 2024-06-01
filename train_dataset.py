@@ -21,6 +21,8 @@ import mediapipe as mp
 import torchvision.transforms as transforms
 import os
 import torchvision.utils as vutils
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 from frames_dataset import FramesDataset
 from PIL import Image
@@ -50,11 +52,7 @@ face_mesh = mp.solutions.face_mesh.FaceMesh(static_image_mode=True, max_num_face
 
 use_cuda = torch.cuda.is_available()
 device = torch.device("cuda" if use_cuda else "cpu")
-torch.autograd.set_detect_anomaly(False)# this slows thing down - only for debug
-
-
-
-
+torch.autograd.set_detect_anomaly(True)# this slows thing down - only for debug
 
 
 '''
@@ -132,7 +130,8 @@ def neg_pair_loss(pos_pair, neg_pairs, margin):
 def discriminator_loss(real_pred, fake_pred):
     real_loss = F.mse_loss(real_pred, torch.ones_like(real_pred))
     fake_loss = F.mse_loss(fake_pred, torch.zeros_like(fake_pred))
-    return (real_loss + fake_loss).requires_grad_()
+    d_loss = (real_loss + fake_loss).requires_grad_()
+    return d_loss
 
 
 def save_img(inp):
@@ -169,7 +168,7 @@ Adversarial Loss (w_adv): The adversarial loss is typically assigned a lower wei
 Feature Matching Loss (w_fm): The feature matching loss is used to stabilize the training process and improve the quality of generated images. A weight of 40 is a relatively high value to give significant importance to feature matching and encourage the generator to produce realistic features.
 Cycle Consistency Loss (w_cos): The cycle consistency loss helps in preserving the identity and consistency between the source and generated images. A weight of 2 is a moderate value to ensure cycle consistency without dominating the other losses.
 '''
-def train_base(cfg, Gbase, Dbase, dataloader):
+def train_base(cfg, Gbase, Dbase, dataloader, local_rank):
     Gbase.train()
     Dbase.train()
     optimizer_G = torch.optim.AdamW(Gbase.parameters(), lr=cfg.training.lr, betas=(0.5, 0.999), weight_decay=1e-2)
@@ -177,18 +176,19 @@ def train_base(cfg, Gbase, Dbase, dataloader):
     scheduler_G = CosineAnnealingLR(optimizer_G, T_max=cfg.training.base_epochs, eta_min=1e-6)
     scheduler_D = CosineAnnealingLR(optimizer_D, T_max=cfg.training.base_epochs, eta_min=1e-6)
     
-    perceptual_loss_fn = PerceptualLoss(device, weights={'vgg19': 20.0, 'vggface': 4.0, 'gaze': 5.0})
-    encoder = Encoder(input_nc=3, output_nc=256).to(device)
+    perceptual_loss_fn = PerceptualLoss(local_rank, weights={'vgg19': 20.0, 'vggface': 4.0, 'gaze': 5.0})
+    encoder = Encoder(input_nc=3, output_nc=256).to(local_rank)
     total_step = len(dataloader) *cfg.training.base_epochs
     cur_step = 0
-
-    for epoch in range(cfg.training.base_epochs):
+    begin_epoch = 15
+    for epoch in range(begin_epoch, cfg.training.base_epochs):
         print("epoch:", epoch)
+        dataloader.sampler.set_epoch(epoch)
         for batch in dataloader:
 
             cur_step += 1
-            source_frame = batch['source'].to(device)
-            driving_frame = batch['driving'].to(device)
+            source_frame = batch['source'].to(local_rank)
+            driving_frame = batch['driving'].to(local_rank)
 
             # Apply face cropping and random warping to the driving frame for losses ONLY!
             # warped_driving_frame =  crop_and_warp_face(driving_frame, pad_to_original=True)
@@ -234,8 +234,8 @@ def train_base(cfg, Gbase, Dbase, dataloader):
             fake_pred = Dbase(output_frame.detach())
             loss_D = discriminator_loss(real_pred, fake_pred)
 
-            # Backpropagate and update discriminator
-            loss_D.backward()
+            # # Backpropagate and update discriminator
+            loss_D.backward(retain_graph=True)
             optimizer_D.step()
                                 # Save the images
             # if save_images:
@@ -248,7 +248,7 @@ def train_base(cfg, Gbase, Dbase, dataloader):
             #     vutils.save_image(masked_target_image, f"{output_dir}/masked_target_image_{idx}.png")
             # saved_wandb = save_img([source_frame, driving_frame, output_frame, masked_predicted_image, masked_target_image])
 
-            if cur_step % 5 == 0:
+            if cur_step % 5 ==0 and dist.get_rank() == 0:
                 logging.info(f"Epoch [{epoch+1}/{cfg.training.base_epochs}], "
                              f"Step [{cur_step}/{total_step}], "
                              f"Loss_G: {total_loss.item():.4f}, "
@@ -258,7 +258,7 @@ def train_base(cfg, Gbase, Dbase, dataloader):
                              f"Loss_adv: {loss_adv.item():.4f}, "
                              f"Loss_D: {loss_D.item():.4f}, ")
                 
-            if cur_step % 20 == 0:
+            if cur_step % 20 == 0 and dist.get_rank() == 0:
                 # saved_img_all = Image.fromarray(saved_wandb)
                 # saved_img_all.save(f"output_images/train_dataset/all_{cur_step}.png")
                 vutils.save_image(output_frame, f"output_images/train_dataset/output_frame_{cur_step}.png")
@@ -287,15 +287,23 @@ def train_base(cfg, Gbase, Dbase, dataloader):
         if (epoch + 1) % cfg.training.log_interval == 0:
             print(f"Epoch [{epoch+1}/{cfg.training.base_epochs}], "
                   f"Loss_G: {total_loss.item():.4f}, Loss_D: {loss_D.item():.4f}")
-        if (epoch + 1) % cfg.training.save_interval == 0:
+        if (epoch + 1) % cfg.training.save_interval == 0 and dist.get_rank() == 0:
             torch.save(Gbase.state_dict(), f"checkpoints/Gbase/Gbase_alldata_epoch{epoch+1}.pth")
             torch.save(Dbase.state_dict(), f"checkpoints/Dbase/Dbase_alldata_epoch{epoch+1}.pth")
 
+def set_seed():
+    seed = np.random.randint(1, 10000)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
 def main(cfg: OmegaConf) -> None:
-    
+
+    set_seed()
+
     use_cuda = torch.cuda.is_available()
     device = torch.device("cuda" if use_cuda else "cpu")
-    #记录训练的超参数
+        #记录训练的超参数
     config = wandb.config
     config = {
         "learning_rate": cfg.training.lr,
@@ -303,13 +311,22 @@ def main(cfg: OmegaConf) -> None:
         "batch_size": cfg.training.batch_size,
         "device" : device 
     }
-    wandb.init(project="MegaPortrait", entity="marvin_tec", name="v1-", config=config, settings=wandb.Settings(start_method="fork"))
-    
-    # transform = transforms.Compose([
+    wandb.init(project="MegaPortrait", entity="marvin_tec", name="v1-ddp", config=config, settings=wandb.Settings(start_method="fork"))
 
-    #     transforms.ToTensor(),
-    #     transforms.Normalize([0.5], [0.5]),
-    # ])
+    parser = argparse.ArgumentParser()
+
+
+    # parser.add_argument('--world-size', default=4, type=int, help='number of distributed processes')
+    parser.add_argument('--local_rank', default=-1, type=int, help='rank of distributed processes')
+    parser.add_argument('--Gbase_path', default='checkpoints/Gbase/Gbase_alldata_epoch150.pth', type=str, help='resume Gbase ckpt')
+    parser.add_argument('--Dbase_path', default='checkpoints/Dbase/Dbase_alldata_epoch150.pth', type=str, help='resume Dbase ckpt')
+    args = parser.parse_args()
+
+    local_rank = args.local_rank
+
+    # DDP：DDP backend初始化
+    torch.cuda.set_device(local_rank)
+    dist.init_process_group(backend='nccl')  # nccl是GPU设备上最快、最推荐的后端
 
     transform = transforms.Compose([
         
@@ -323,8 +340,18 @@ def main(cfg: OmegaConf) -> None:
    #     transforms.ColorJitter() # "as augmentation for both source and target images, we use color jitter and random flip"
 
     voxceleb_dataset = FramesDataset(is_train=True, transform=transform,  **cfg['data'])
-    dataloader = DataLoader(voxceleb_dataset, batch_size=cfg.training.batch_size, pin_memory=True,shuffle=True, num_workers=cfg.training.num_workers, drop_last=True)
+    train_sampler = torch.utils.data.distributed.DistributedSampler(voxceleb_dataset, shuffle=True)
+    dataloader = DataLoader(voxceleb_dataset, batch_size=cfg.training.batch_size, 
+                            pin_memory=True, num_workers=cfg.training.num_workers, 
+                            sampler=train_sampler)
+    
+    # transform = transforms.Compose([
 
+    #     transforms.ToTensor(),
+    #     transforms.Normalize([0.5], [0.5]),
+    # ])
+
+    
     # dataset = EMODataset(
     #     use_gpu=use_cuda,
     #     width=cfg.data.train_width,
@@ -339,10 +366,24 @@ def main(cfg: OmegaConf) -> None:
     
     # dataloader = DataLoader(dataset, batch_size=4, shuffle=True, num_workers=cfg.training.num_workers)
     
-    Gbase = model.Gbase().to(device)
-    Dbase = model.Discriminator(input_nc=3).to(device) # 🤷
-    
-    train_base(cfg, Gbase, Dbase, dataloader)    
+    Gbase = model.Gbase(local_rank).to(local_rank)
+    Dbase = model.Discriminator(input_nc=3).to(local_rank) # 🤷
+
+    # if dist.get_rank() == 0 and args.Gbase_path is not None and args.Dbase_path is not None :
+    #     Gbase.load_state_dict(torch.load(args.Gbase_path))
+    #     Dbase.load_state_dict(torch.load(args.Dbase_path))
+
+    Gbase = torch.nn.SyncBatchNorm.convert_sync_batchnorm(Gbase) 
+    Gbase = DDP(Gbase, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
+    # Gbase.load_state_dict(torch.load("checkpoints/Gbase/Gbase_alldata_epoch120.pth"))
+    ## 注意要使用find_unused_parameters=True，因为有时候模型里面定义的一些模块 在forward函数里面没有调用，如果不使用find_unused_parameters=True 会报错
+    Dbase = torch.nn.SyncBatchNorm.convert_sync_batchnorm(Dbase) 
+    # model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.local_rank], output_device=args.local_rank, find_unused_parameters=True) 
+    Dbase = DDP(Dbase, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
+    # Dbase.load_state_dict(torch.load('checkpoints/Dbase/Dbase_alldata_epoch150.pth'))
+
+
+    train_base(cfg, Gbase, Dbase, dataloader, local_rank=local_rank)    
     torch.save(Gbase.state_dict(), 'Gbase_final.pth')
 
 
