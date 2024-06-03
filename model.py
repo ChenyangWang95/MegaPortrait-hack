@@ -53,8 +53,10 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 class Conv2d_WS(nn.Conv2d):
     def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1, groups=1, bias=True):
         super(Conv2d_WS, self).__init__(in_channels, out_channels, kernel_size, stride, padding, dilation, groups, bias)
-        self.register_buffer('weight_mean', torch.zeros(self.weight.shape))
-        self.register_buffer('weight_std', torch.ones(self.weight.shape))
+        tmp_mean = self.weight.mean(dim=[1, 2, 3], keepdim=True)
+        weight_std = self.weight.std(dim=[1, 2, 3], keepdim=True)
+        self.register_buffer('weight_mean', torch.zeros(tmp_mean.shape))
+        self.register_buffer('weight_std', torch.ones(weight_std.shape))
     
 #    @profile
     def forward(self, x):
