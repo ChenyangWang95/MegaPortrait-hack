@@ -16,8 +16,7 @@ from torchvision import models
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-
-from model import Encoder,PerceptualLoss,crop_and_warp_face,get_foreground_mask, CosSimLoss, GANLoss
+from model import Encoder,PerceptualLoss,crop_and_warp_face,get_foreground_mask, CosSimLoss
 # from rome_losses import Vgg19 # use vgg19 for perceptualloss 
 
 import mediapipe as mp
@@ -38,25 +37,16 @@ import wandb
 os.environ['WANDB_MODE'] = 'offline' # for debug
 
 
-# # Define the transform for data preprocessing
-transform = transforms.Compose([
-    transforms.ToTensor(),
-    transforms.Normalize([0.5], [0.5]),
-])
-
-
-
-
 # Create a directory to save the images (if it doesn't already exist)
 output_dir = "output_images"
 os.makedirs(output_dir, exist_ok=True)
 
 
-face_mesh = mp.solutions.face_mesh.FaceMesh(static_image_mode=True, max_num_faces=1, min_detection_confidence=0.5)
+# face_mesh = mp.solutions.face_mesh.FaceMesh(static_image_mode=True, max_num_faces=1, min_detection_confidence=0.5)
 
 use_cuda = torch.cuda.is_available()
 device = torch.device("cuda" if use_cuda else "cpu")
-# torch.autograd.set_detect_anomaly(True)# this slows thing down - only for debug
+# torch.autograd.set_detect_anomaly(False)# this slows thing down - only for debug
 
 
 '''
@@ -101,22 +91,6 @@ def adversarial_loss(output_frame, discriminator):
     loss = F.mse_loss(fake_pred, torch.ones_like(fake_pred))
     return loss.requires_grad_()
 
-def feature_matching_loss(pred_fake, pred_real):
-    loss_G_GAN_Feat = 0
-        
-    feat_weights = 4.0 / (3 + 1)
-    D_weights = 1.0 / 3
-    # print(len(pred_fake))
-    for i in range(3):
-        # print(len(pred_fake[i]))
-        # quit()
-        for j in range(len(pred_fake[i])-1):
-            loss_G_GAN_Feat += D_weights * feat_weights * \
-                (torch.nn.L1Loss(pred_fake[i][j], pred_real[i][j].detach()))
-    print(loss_G_GAN_Feat)
-    return loss_G_GAN_Feat
-
-
 # @profile
 def cycle_consistency_loss(output_frame, source_frame, driving_frame, generator):
     reconstructed_source = generator(output_frame, source_frame)
@@ -148,7 +122,7 @@ def neg_pair_loss(pos_pair, neg_pairs, margin):
     return loss
 
 # align to cyclegan
-def discriminator_loss_bk(real_pred, fake_pred, loss_type='lsgan'):
+def discriminator_loss(real_pred, fake_pred, loss_type='lsgan'):
     if loss_type == 'lsgan':
         real_loss = torch.mean((real_pred - 1)**2)
         fake_loss = torch.mean(fake_pred**2)
@@ -157,14 +131,8 @@ def discriminator_loss_bk(real_pred, fake_pred, loss_type='lsgan'):
         fake_loss = F.binary_cross_entropy_with_logits(fake_pred, torch.zeros_like(fake_pred))
     else:
         raise NotImplementedError(f'Loss type {loss_type} is not implemented.')
-
-    return ((real_loss + fake_loss) * 0.5).requires_grad_()
-
-# # @profile
-# def discriminator_loss(real_pred, fake_pred):
-#     real_loss = F.mse_loss(real_pred, torch.ones_like(real_pred))
-#     fake_loss = F.mse_loss(fake_pred, torch.zeros_like(fake_pred))
-#     return (real_loss + fake_loss).requires_grad_()
+    
+    return (real_loss + fake_loss) * 0.5
 
 def mse_loss(img1, img2):
     loss = F.mse_loss(img1, img2)
@@ -226,18 +194,18 @@ def train_base(cfg, Gbase, Dbase, dataloader, local_rank):
     scheduler_D = CosineAnnealingLR(optimizer_D, T_max=cfg.training.base_epochs, eta_min=1e-6)
     
     perceptual_loss_fn = PerceptualLoss(local_rank, weights={'vgg19': 20.0, 'vggface': 4.0, 'gaze': 5.0})
-    # GAN_loss = GANLoss()
-    # encoder = Encoder(input_nc=3, output_nc=256).to(local_rank)
+    cosine_feat_loss = CosSimLoss()
     total_step = len(dataloader) *cfg.training.base_epochs
     begin_epoch = 0
     cur_step = begin_epoch*len(dataloader)
     scaler = GradScaler()
-    print(len(dataloader))
+
     # prefetcher = DataPrefetcher(dataloader, device)
 
 
     for epoch in range(begin_epoch, cfg.training.base_epochs):
-        print("epoch:", epoch)
+        # print("epoch:", epoch)
+        print(len(dataloader))
         dataloader.sampler.set_epoch(epoch)
         # batch = prefetcher.next()
         for batch in dataloader:
@@ -252,11 +220,10 @@ def train_base(cfg, Gbase, Dbase, dataloader, local_rank):
             # warped_driving_frame =  crop_and_warp_face(driving_frame, pad_to_original=True)
                     
             # Train generator
-            
-            # with torch.autograd.detect_anomaly():
             optimizer_G.zero_grad()
             with autocast():
-                output_frame = Gbase(source_frame, driving_frame, same_subject=False) 
+
+                output_frame, pose2drive, dyn2source = Gbase(source_frame, driving_frame) 
                 s_start_d_pred = Gbase(random_source_frame, driving_frame, same_subject=False)
                 # output_frame_random = Gbase(source_frame, random_driving_frame, same_subject=False)
 
@@ -265,82 +232,45 @@ def train_base(cfg, Gbase, Dbase, dataloader, local_rank):
                 _, _, z_d = Gbase.module.motionEncoder(driving_frame)
                 _, _, z_d_star = Gbase.module.motionEncoder(random_driving_frame)
 
+                
                 # 256 x 256 - Resize output_frame to match the driving_frame size
                 # output_frame = F.interpolate(output_frame, size=(256, 256), mode='bilinear', align_corners=False)
 
                 # Obtain the foreground mask for the target image
-                # foreground_mask = get_foreground_mask(driving_frame)
+                foreground_mask = get_foreground_mask(driving_frame)
                 
                 # Move the foreground mask to the same device as output_frame
-                # foreground_mask = foreground_mask.to(output_frame.device)
+                foreground_mask = foreground_mask.to(output_frame.device)
 
                 # Multiply the predicted and target images with the foreground mask
-                # masked_predicted_image = output_frame * foreground_mask
-                # masked_target_image = driving_frame * foreground_mask
-                            
-                                        
-                # perceptual losses
-                perceptual_loss = perceptual_loss_fn(output_frame, driving_frame)
+                masked_predicted_image = output_frame * foreground_mask
+                masked_target_image = driving_frame * foreground_mask
+                                            
+                # Calculate perceptual losses
+                perceptual_loss = perceptual_loss_fn(masked_predicted_image, masked_target_image)
 
-                # adversarial losses
-                real_pred = Dbase(driving_frame)
-                fake_pred = Dbase(output_frame.detach())
-
-                # loss_adv = GAN_loss(fake_pred, True, local_rank)
-
-                # loss_fm = feature_matching_loss(real_pred, fake_pred)
-                # perceptual_loss = perceptual_loss_fn(masked_predicted_image, masked_target_image, use_fm_loss=True)
-                
-                # Calculate cycle consistency loss
-                # loss_cos = contrastive_loss(masked_predicted_image, masked_target_image, masked_predicted_image, encoder)
+                # Calculate adversarial losses
+                loss_adv = adversarial_loss(masked_predicted_image, Dbase)
+                # loss_fm = perceptual_loss_fn(masked_predicted_image, masked_target_image, use_fm_loss=True)
                 
                 # cos loss for different latent
                 pos_pair = [(z_s_d, z_d), (z_s_start_d, z_d)]
                 neg_pair = [(z_s_d, z_d_star), (z_s_start_d, z_d_star)]
                 loss_cos = cosine_loss(pos_pair, neg_pair)
 
-                # additional loss in VASA
+                # These losses are from the paper of vasa
                 # dynamics_transfer_loss = mse_loss(pose2drive, dyn2source)
-                # cosine_similar_loss = cosine_loss(output_frame, output_frame_random)
+                # cosine_similar_loss = cosine_feat_loss(output_frame, output_frame_random)
 
                 # Combine the losses
                 # total_loss = cfg.training.w_per * perceptual_loss + cfg.training.w_adv * loss_adv + cfg.training.w_fm * loss_fm + cfg.training.w_cos * loss_cos + 10*dynamics_transfer_loss + 10*cosine_similar_loss
-                print(perceptual_loss)
+                total_loss = cfg.training.w_per * perceptual_loss + cfg.training.w_adv * loss_adv + cfg.training.w_cos * loss_cos
+                # Train discriminator
+                real_pred = Dbase(driving_frame)
+                fake_pred = Dbase(output_frame.detach())    
+                loss_D = discriminator_loss(real_pred, fake_pred)
                 
-                total_loss =   cfg.training.w_per * perceptual_loss 
-                # cfg.training.w_cos * loss_cos+ cfg.training.w_adv * loss_adv + cfg.training.w_fm * loss_fm 
-                #  + cfg.training.w_adv * loss_adv + cfg.training.w_fm * loss_fm 
-
-                   
-                # loss_D_real = GAN_loss(real_pred, True, local_rank)
-                # loss_D_fake = GAN_loss(fake_pred, False, local_rank)
-                # loss_D = (loss_D_fake + loss_D_real) * 0.5
-
-            # # print grad check
-            #     v_n = []
-            #     v_v = []
-            #     v_g = []
-            #     for name, parameter in Gbase.named_parameters():
-            #         v_n.append(name)
-            #         v_v.append(parameter.detach().cpu().numpy() if parameter is not None else [0])
-            #         v_g.append(parameter.grad.detach().cpu().numpy() if parameter.grad is not None else [0])
-            #     for i in range(len(v_n)):
-            #         if np.max(v_v[i]).item() - np.min(v_v[i]).item() < 1e-6:
-            #             color = '*'
-            #         # else:
-            #             # color = ' '
-            #         # print('%svalue %s: %.3e ~ %.3e' % (color, v_n[i], np.min(v_v[i]).item(), np.max(v_v[i]).item()))
-            #             print('%sgrad  %s: %.3e ~ %.3e' % (color, v_n[i], np.min(v_g[i]).item(), np.max(v_g[i]).item()))
-                # 收集每个可学习参数的梯度
-                grads = {}
-                for name, param in Gbase.named_parameters():
-                    if param.requires_grad:
-                        grads[name] = param.grad
-
-                # 输出梯度
-                print(grads)
-
-            scaler.scale(total_loss).backward(retain_graph=True)
+            scaler.scale(total_loss).backward()
             scaler.step(optimizer_G)
             scaler.update()
             # Backpropagate and update generator
@@ -348,15 +278,15 @@ def train_base(cfg, Gbase, Dbase, dataloader, local_rank):
             # optimizer_G.step()
 
             # Train discriminator
-            # optimizer_D.zero_grad()
+            optimizer_D.zero_grad()
 
             
             # Backpropagate and update discriminator
             # loss_D.backward()
             # optimizer_D.step()
-            # scaler.scale(loss_D).backward()
-            # scaler.step(optimizer_D)
-            # scaler.update()
+            scaler.scale(loss_D).backward()
+            scaler.step(optimizer_D)
+            scaler.update()
             
                                 # Save the images
             # if save_images:
@@ -369,12 +299,12 @@ def train_base(cfg, Gbase, Dbase, dataloader, local_rank):
             #     vutils.save_image(masked_target_image, f"{output_dir}/masked_target_image_{idx}.png")
             # saved_wandb = save_img([source_frame, driving_frame, output_frame, masked_predicted_image, masked_target_image])
 
-            if cur_step % 1 ==0 and dist.get_rank() == 0:
+            if cur_step % 1 == 0 and dist.get_rank() == 0:
                 logging.info(f"Epoch [{epoch+1}/{cfg.training.base_epochs}], "
                              f"Step [{cur_step}/{total_step}], "
                              f"Loss_G: {total_loss.item():.4f}, "
                              f"Loss_per: {perceptual_loss.item():.4f}, "
-                             f"Loss_fm: {loss_fm.item():.4f}, "
+                            #  f"Loss_fm: {loss_fm.item():.4f}, "
                              f"Loss_cos: {loss_cos.item():.4f}, "
                              f"Loss_adv: {loss_adv.item():.4f}, "
                             #  f"Loss_cosine: {cosine_similar_loss.item():.4f}, "
@@ -396,9 +326,9 @@ def train_base(cfg, Gbase, Dbase, dataloader, local_rank):
             # wandb.log({"frames and results": Img}, step=cur_step)
     
             wandb.log({"Loss_G": total_loss.item(),
-                        "Loss_fm": loss_fm.item(),
+                        # "Loss_fm": loss_fm.item(),
                         "Loss_per": perceptual_loss.item(),
-                        # "Loss_cos": loss_cos.item(),
+                        "Loss_cos": loss_cos.item(),
                         "Loss_adv": loss_adv.item(),
                         # "Loss_dyn_transfer": dynamics_transfer_loss.item(),
                         # "Loss_cosine": cosine_similar_loss.item(),
@@ -411,7 +341,10 @@ def train_base(cfg, Gbase, Dbase, dataloader, local_rank):
         scheduler_D.step()
 
         # Log and save checkpoints
-        if (epoch + 1) % cfg.training.save_interval == 0 and dist.get_rank() == 0:
+        if (epoch + 1) % cfg.training.log_interval == 0:
+            print(f"Epoch [{epoch+1}/{cfg.training.base_epochs}], "
+                  f"Loss_G: {total_loss.item():.4f}, Loss_D: {loss_D.item():.4f}")
+        if (epoch + 1) % cfg.training.save_interval == 0:
             torch.save(Gbase.state_dict(), f"checkpoints/Gbase/Gbase_cross_id_epoch{epoch+1}.pth")
             torch.save(Dbase.state_dict(), f"checkpoints/Dbase/Dbase_cross_id_epoch{epoch+1}.pth")
 
@@ -423,7 +356,7 @@ def set_seed():
 
 
 def main(cfg: OmegaConf) -> None:
-
+    import datetime
     # set_seed()
 
     use_cuda = torch.cuda.is_available()
@@ -450,7 +383,7 @@ def main(cfg: OmegaConf) -> None:
 
     # DDP：DDP backend初始化
     torch.cuda.set_device(local_rank)
-    dist.init_process_group(backend='nccl')  # nccl是GPU设备上最快、最推荐的后端
+    dist.init_process_group(backend='nccl', timeout=datetime.timedelta(seconds=720))  # nccl是GPU设备上最快、最推荐的后端
 
     # transform = transforms.Compose([
 

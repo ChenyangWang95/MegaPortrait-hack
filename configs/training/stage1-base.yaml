@@ -4,7 +4,7 @@ data:
   # sample_rate: 25 
   # n_sample_frames: 1
   # n_motion_frames: 2
-  root_dir: '/home/chenyang/DataSet/Vox2Celeb'
+  root_dir: '/workspace/data/celebavhq'
   frame_shape: [256, 256, 3]
   id_sampling: False
   pairs_list: None
@@ -31,8 +31,8 @@ training:
   lambda_gaze: 1.0
   lambda_supervised: 1.0
   lambda_unsupervised: 1.0
-  batch_size: 4
-  num_workers: 16
+  batch_size: 2
+  num_workers: 8
   lr: 1.0e-5
   base_epochs: 200000
   hr_epochs: 50
@@ -44,7 +44,7 @@ training:
   n_sample_frames: 100
   json_file: './data/overfit.json'
   
-  w_per: 20  # perceptual loss
+  w_per: 1  # perceptual loss
   w_adv: 1   # adversarial loss
   w_fm: 40   # feature matching loss
   w_cos: 2   # cycle consistency loss

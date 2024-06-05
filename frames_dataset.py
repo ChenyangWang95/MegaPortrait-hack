@@ -84,6 +84,11 @@ class FramesDataset(Dataset):
                 if ext == '.mp4':
                     fromdir = os.path.join(root, name)  # mp4文件原始地址
                     self.videos.append(fromdir)
+        # for debug
+        # videos = os.listdir('junk/test')
+        # for video in videos:
+        #     path_tmp = os.path.join('junk/test', video)
+        #     self.videos.append(path_tmp)
         random.shuffle(self.videos)
         self.frame_shape = tuple(frame_shape)
         self.pairs_list = pairs_list
@@ -106,9 +111,9 @@ class FramesDataset(Dataset):
         #     train_videos, test_videos = train_test_split(self.videos, random_state=random_seed, test_size=0.2)
 
         if is_train:
-            self.videos = self.videos[:1000]
+            self.videos = self.videos
         else:
-            self.videos = self.videos[:1000]
+            self.videos = self.videos
 
         self.is_train = is_train
 
@@ -188,12 +193,12 @@ class FramesDataset(Dataset):
         if self.is_train:
             source = video_array_trans[0]
             driving = video_array_trans[1]
-            # random_source = video_array_trans_rand[0]
+            random_source = video_array_trans_rand[0]
             random_driving = video_array_trans_rand[1]
             
             out['driving'] = driving
             out['source'] = source
-            # out['random_source'] = random_source
+            out['random_source'] = random_source
             out['random_driving'] = random_driving
 
             # out['driving'] = driving.transpose((2, 0, 1))

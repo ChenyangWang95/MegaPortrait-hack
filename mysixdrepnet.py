@@ -770,7 +770,7 @@ import numpy as np
 
 class SixDRepNet_Detector():
 
-    def __init__(self, gpu_id : int=0, dict_path: str=''):
+    def __init__(self, gpu_id, dict_path: str=''):
         """
         Constructs the SixDRepNet instance with all necessary attributes.
 
@@ -796,8 +796,8 @@ class SixDRepNet_Detector():
         self.model.eval()
         self.model.load_state_dict(saved_state_dict)
         
-        if self.gpu != -1:
-            self.model.cuda(self.gpu)
+        if self.gpu is not None:
+            self.model.cuda(gpu_id)
 
         self.transformations = transforms.Compose([transforms.Resize(224),
                                 transforms.CenterCrop(224),
@@ -913,7 +913,7 @@ from torchvision import transforms
 import matplotlib
 from matplotlib import pyplot as plt
 from PIL import Image
-matplotlib.use('TkAgg')
+# matplotlib.use('TkAgg')
 
 
 
