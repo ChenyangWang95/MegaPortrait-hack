@@ -516,13 +516,13 @@ class ResBlock3D(nn.Module):
         
         out = self.conv1(x)
         out = self.gn1(out)
-        out = F.relu(out, inplace=True)
+        out = F.relu(out, inplace=False)
         
         out = self.conv2(out)
         out = self.gn2(out)
         
         out += identity
-        out = F.relu(out, inplace=True)
+        out = F.relu(out, inplace=False)
         
         if self.upsample:
             out = F.interpolate(out, scale_factor=self.scale_factors, mode='trilinear', align_corners=False)
@@ -625,7 +625,7 @@ class ResBlock2D(nn.Module):
         
         out = self.conv1(x)
         out = self.bn1(out)
-        out = nn.ReLU(inplace=True)(out)
+        out = nn.ReLU(inplace=False)(out)
         
         out = self.conv2(out)
         out = self.bn2(out)
@@ -637,7 +637,7 @@ class ResBlock2D(nn.Module):
         identity = self.shortcut(identity)
         
         out += identity
-        out = nn.ReLU(inplace=True)(out)
+        out = nn.ReLU(inplace=False)(out)
         
         return out
 '''
@@ -697,7 +697,7 @@ class G2d(nn.Module):
 
         self.final_conv = nn.Sequential(
             nn.GroupNorm(num_groups=32, num_channels=64),
-            nn.ReLU(inplace=True), 
+            nn.ReLU(inplace=False), 
             nn.Conv2d(64, 3, kernel_size=3, padding=1),
             nn.Sigmoid()
         ).to(device)
@@ -1588,7 +1588,7 @@ class Student(nn.Module):
         )
         self.final_layer = nn.Sequential(
             nn.InstanceNorm2d(192),
-            nn.ReLU(inplace=True),
+            nn.ReLU(inplace=False),
             nn.Conv2d(192, 3, kernel_size=1),
         )
 

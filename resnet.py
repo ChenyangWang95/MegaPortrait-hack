@@ -80,7 +80,7 @@ class BasicBlock(nn.Module):
         # Both self.conv1 and self.downsample layers downsample the input when stride != 1
         self.conv1 = conv3x3(inplanes, planes, stride)
         self.bn1 = norm_layer(planes)
-        self.relu = nn.ReLU(inplace=True)
+        self.relu = nn.ReLU(inplace=False)
         self.conv2 = conv3x3(planes, planes)
         self.bn2 = norm_layer(planes)
         self.downsample = downsample
@@ -130,7 +130,7 @@ class Bottleneck(nn.Module):
         self.bn2 = norm_layer(width)
         self.conv3 = conv1x1(width, planes * self.expansion)
         self.bn3 = norm_layer(planes * self.expansion)
-        self.relu = nn.ReLU(inplace=True)
+        self.relu = nn.ReLU(inplace=False)
         self.downsample = downsample
         self.stride = stride
 
@@ -193,7 +193,7 @@ class ResNet(nn.Module):
         # END
 
         self.bn1 = norm_layer(self.inplanes)
-        self.relu = nn.ReLU(inplace=True)
+        self.relu = nn.ReLU(inplace=False)
         self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
         self.layer1 = self._make_layer(block, 64, layers[0])
         self.layer2 = self._make_layer(
@@ -374,14 +374,14 @@ class ResBlock2D(nn.Module):
         layer_s = list()
         layer_s.append(nn.Conv2d(n_c, n_c, kernel, padding=padding, dilation=dilation, bias=False))
         layer_s.append(nn.InstanceNorm2d(n_c, affine=True, eps=1e-6))
-        layer_s.append(nn.ELU(inplace=True))
+        layer_s.append(nn.ELU(inplace=False))
         # dropout
         layer_s.append(nn.Dropout(p_drop))
         # convolution
         layer_s.append(nn.Conv2d(n_c, n_c, kernel, dilation=dilation, padding=padding, bias=False))
         layer_s.append(nn.InstanceNorm2d(n_c, affine=True, eps=1e-6))
         self.layer = nn.Sequential(*layer_s)
-        self.final_activation = nn.ELU(inplace=True)
+        self.final_activation = nn.ELU(inplace=False)
 
     def _get_same_padding(self, kernel, dilation):
         return (kernel + (kernel - 1) * (dilation - 1) - 1) // 2

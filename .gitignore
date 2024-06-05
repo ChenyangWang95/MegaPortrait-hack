@@ -9,3 +9,4 @@ output_images/
 checkpoints/*
 wandb/
 junk/
+log_files/

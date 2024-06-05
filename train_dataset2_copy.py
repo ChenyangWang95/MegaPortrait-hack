@@ -217,7 +217,7 @@ def train_base(cfg, Gbase, Dbase, dataloader):
             optimizer_G.zero_grad()
             # with autocast():
 
-            output_frame, pose2drive, dyn2source = Gbase(source_frame, driving_frame) 
+            output_frame = Gbase(source_frame, driving_frame, same_subject=False) 
             s_start_d_pred = Gbase(random_source_frame, driving_frame, same_subject=False)
             # output_frame_random = Gbase(source_frame, random_driving_frame, same_subject=False)
 
@@ -245,7 +245,7 @@ def train_base(cfg, Gbase, Dbase, dataloader):
 
             # Calculate adversarial losses
             loss_adv = adversarial_loss(masked_predicted_image, Dbase)
-            loss_fm = perceptual_loss_fn(masked_predicted_image, masked_target_image, use_fm_loss=True)
+            # loss_fm = perceptual_loss_fn(masked_predicted_image, masked_target_image, use_fm_loss=True)
             
             # cos loss for different latent
             pos_pair = [(z_s_d, z_d), (z_s_start_d, z_d)]
@@ -258,7 +258,7 @@ def train_base(cfg, Gbase, Dbase, dataloader):
 
             # Combine the losses
             # total_loss = cfg.training.w_per * perceptual_loss + cfg.training.w_adv * loss_adv + cfg.training.w_fm * loss_fm + cfg.training.w_cos * loss_cos + 10*dynamics_transfer_loss + 10*cosine_similar_loss
-            total_loss = cfg.training.w_per * perceptual_loss + cfg.training.w_adv * loss_adv + cfg.training.w_fm * loss_fm + cfg.training.w_cos * loss_cos
+            total_loss = cfg.training.w_per * perceptual_loss + cfg.training.w_adv * loss_adv + cfg.training.w_cos * loss_cos
             # Train discriminator
             real_pred = Dbase(driving_frame)
             fake_pred = Dbase(output_frame.detach())    
@@ -298,7 +298,7 @@ def train_base(cfg, Gbase, Dbase, dataloader):
                              f"Step [{cur_step}/{total_step}], "
                              f"Loss_G: {total_loss.item():.4f}, "
                              f"Loss_per: {perceptual_loss.item():.4f}, "
-                             f"Loss_fm: {loss_fm.item():.4f}, "
+                            #  f"Loss_fm: {loss_fm.item():.4f}, "
                             #  f"Loss_cos: {loss_cos.item():.4f}, "
                              f"Loss_adv: {loss_adv.item():.4f}, "
                             #  f"Loss_cosine: {cosine_similar_loss.item():.4f}, "
@@ -319,7 +319,7 @@ def train_base(cfg, Gbase, Dbase, dataloader):
             # wandb.log({"frames and results": Img}, step=cur_step)
     
             wandb.log({"Loss_G": total_loss.item(),
-                        "Loss_fm": loss_fm.item(),
+                        # "Loss_fm": loss_fm.item(),
                         "Loss_per": perceptual_loss.item(),
                         # "Loss_cos": loss_cos.item(),
                         "Loss_adv": loss_adv.item(),

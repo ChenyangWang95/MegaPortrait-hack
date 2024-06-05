@@ -34,7 +34,7 @@ import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 import wandb
-os.environ['WANDB_MODE'] = 'offline' # for debug
+# os.environ['WANDB_MODE'] = 'offline' # for debug
 
 # import warnings
 
