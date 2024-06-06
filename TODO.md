@@ -11,3 +11,7 @@
 
 
 python -m torch.distributed.launch --nproc_per_node=2 train_dataset.py
+
+ps aux|grep python|grep -v grep | awk '{print $2}'|xargs kill -9
+
+nohup python -m torch.distributed.launch --nproc_per_node=8 train_dataset.py > log_files/240605_gpus8.log 2>&1 &

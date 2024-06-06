@@ -2045,65 +2045,66 @@ We obtain the predicted segmentation mask by taking the argmax of the output alo
 We convert the segmentation mask to a binary foreground mask by comparing the predicted class labels with the class index representing the person class (assuming it is 15 in this example). The resulting mask will have values of 1 for foreground pixels and 0 for background pixels.
 Finally, we return the foreground mask.
 '''
-def get_foreground_mask(image):
-    # Load the pre-trained DeepLabV3 model
-    model = models.segmentation.deeplabv3_resnet101(pretrained=True)
-    model.eval()
+def get_foreground_mask(model, images, local_rank):
+
 
     # Define the image transformations
     transform = transforms.Compose([
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
+    mask_output = []
+    for image in images:
+        # Check if the input is a PyTorch tensor
+        if isinstance(image, torch.Tensor):
+            # Assume the tensor is already in the range [0, 1]
+            if image.dim() == 4 and image.shape[0] == 1:
+                # Remove the extra dimension if present
+                # image = image.squeeze(0)
+                image = image
+            input_tensor = image
+        else:
+            # Convert PIL Image or NumPy array to tensor
+            input_tensor = transforms.ToTensor()(image)
+            input_tensor = transform(input_tensor).unsqueeze(0)
 
-    # Check if the input is a PyTorch tensor
-    if isinstance(image, torch.Tensor):
-        # Assume the tensor is already in the range [0, 1]
-        if image.dim() == 4 and image.shape[0] == 1:
-            # Remove the extra dimension if present
-            # image = image.squeeze(0)
-            image = image
-        input_tensor = image
-    else:
-        # Convert PIL Image or NumPy array to tensor
-        input_tensor = transforms.ToTensor()(image)
-        input_tensor = transform(input_tensor).unsqueeze(0)
+        # Move the input tensor to the same device as the model
+        device = next(model.parameters()).device
+        input_tensor = input_tensor.to(device)
 
-    # Move the input tensor to the same device as the model
-    device = next(model.parameters()).device
-    input_tensor = input_tensor.to(device)
+        # Perform the segmentation
+        with torch.no_grad():
+            output = model(input_tensor)
 
-    # Perform the segmentation
-    with torch.no_grad():
-        output = model(input_tensor)
+        # Get the predicted segmentation mask
+        _, mask = torch.max(output['out'], dim=1)
 
-    # Get the predicted segmentation mask
-    _, mask = torch.max(output['out'], dim=1)
+        # Convert the segmentation mask to a binary foreground mask
+        foreground_mask = (mask == 15).float()  # Assuming class 15 represents the person class
+        foreground_mask = foreground_mask.unsqueeze(1)
+        foreground_mask.to(device)
+        mask_output.append(foreground_mask)
 
-    # Convert the segmentation mask to a binary foreground mask
-    foreground_mask = (mask == 15).float()  # Assuming class 15 represents the person class
-    foreground_mask = foreground_mask.unsqueeze(1)
-
-    return foreground_mask.to(device)
+    return mask_output
 
 
-class Discriminator(nn.Module):
-    def __init__(self, input_nc, ndf=64, n_layers=3):
-        super(Discriminator, self).__init__()
+# class Discriminator(nn.Module):
+#     def __init__(self, input_nc, ndf=64, n_layers=3):
+#         super(Discriminator, self).__init__()
         
-        layers = [nn.Conv2d(input_nc, ndf, kernel_size=4, stride=2, padding=1), 
-                  nn.LeakyReLU(0.2, True)]
+#         layers = [nn.Conv2d(input_nc, ndf, kernel_size=4, stride=2, padding=1), 
+#                   nn.LeakyReLU(0.2, True)]
         
-        for i in range(1, n_layers):
-            layers += [nn.Conv2d(ndf * 2**(i-1), ndf * 2**i, kernel_size=4, stride=2, padding=1),
-                       nn.InstanceNorm2d(ndf * 2**i),
-                       nn.LeakyReLU(0.2, True)]
+#         for i in range(1, n_layers):
+#             layers += [nn.Conv2d(ndf * 2**(i-1), ndf * 2**i, kernel_size=4, stride=2, padding=1),
+#                        nn.InstanceNorm2d(ndf * 2**i),
+#                        nn.LeakyReLU(0.2, True)]
         
-        layers += [nn.Conv2d(ndf * 2**(n_layers-1), 1, kernel_size=4, stride=1, padding=1)]
+#         layers += [nn.Conv2d(ndf * 2**(n_layers-1), 1, kernel_size=4, stride=1, padding=1)]
         
-        self.model = nn.Sequential(*layers)
+#         self.model = nn.Sequential(*layers)
 
-    def forward(self, x):
-        return self.model(x)
+#     def forward(self, x):
+#         return self.model(x)
 
 
 class MultiscaleDiscriminator(nn.Module):
@@ -2197,6 +2198,46 @@ class NLayerDiscriminator(nn.Module):
             return res[1:]
         else:
             return self.model(input)
+
+class Discriminator(nn.Module):
+    def __init__(self, in_channels=3):
+        super(Discriminator, self).__init__()
+
+        def discriminator_block(in_filters, out_filters, normalization=True):
+            """Returns downsampling layers of each discriminator block"""
+            layers = [nn.Conv2d(in_filters, out_filters, 4, stride=2, padding=1)]
+            if normalization:
+                layers.append(nn.InstanceNorm2d(out_filters))
+            layers.append(nn.LeakyReLU(0.2, inplace=False))
+            return layers
+        # self.layer1 = discriminator_block(in_channels * 2, 64, normalization=False)
+        # self.layer2 = discriminator_block(64, 128, normalization=False)
+        # self.layer3 = discriminator_block(128, 256, normalization=False)
+        # self.layer6 = discriminator_block(256, 512, normalization=False)
+        # self.layer4 = nn.ZeroPad2d((1, 0, 1, 0))
+        # self.layer5 = nn.Conv2d(512, 1, 4, padding=1, bias=False)
+        self.model = nn.Sequential(
+            *discriminator_block(in_channels * 2, 64, normalization=False),
+            *discriminator_block(64, 128),
+            *discriminator_block(128, 256),
+            *discriminator_block(256, 512),
+            nn.ZeroPad2d((1, 0, 1, 0)),
+            nn.Conv2d(512, 1, 4, padding=1, bias=False)
+        )
+
+    def forward(self, img_A, img_B):
+        # Concatenate image and condition image by channels to produce input
+        img_input = torch.cat((img_A, img_B), 1)
+        # out = self.layer1(img_input)
+        # out = self.layer2(out)
+        # out = self.layer3(out)
+        # out = self.layer6(out)
+        # out = self.layer4(out)
+        # out = self.layer5(out)
+
+        out = self.model(img_input)
+        return out
+
 
 class GANLoss(nn.Module):
     def __init__(self, use_lsgan=True, target_real_label=1.0, target_fake_label=0.0,

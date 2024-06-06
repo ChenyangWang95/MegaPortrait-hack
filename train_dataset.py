@@ -35,16 +35,7 @@ import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 import wandb
-# os.environ['WANDB_MODE'] = 'offline' # for debug
-
-
-# # Define the transform for data preprocessing
-transform = transforms.Compose([
-    transforms.ToTensor(),
-    transforms.Normalize([0.5], [0.5]),
-])
-
-
+os.environ['WANDB_MODE'] = 'offline' # for debug
 
 
 # Create a directory to save the images (if it doesn't already exist)
@@ -183,19 +174,45 @@ def save_img(inp):
     
     return save
 
-def cosine_loss(pos_pairs, neg_pairs,  s=5.0,m=0.2): # We also set 𝑠 = 5 and 𝑚 = 0.2 in the cosine loss.
+def cosine_loss(pos_pairs, neg_pairs, s=5.0, m=0.2):
+    assert isinstance(pos_pairs, list) and isinstance(neg_pairs, list), "pos_pairs and neg_pairs should be lists"
+    assert len(pos_pairs) > 0, "pos_pairs should not be empty"
+    assert len(neg_pairs) > 0, "neg_pairs should not be empty"
+    assert s > 0, "s should be greater than 0"
+    assert 0 <= m <= 1, "m should be between 0 and 1"
+    
     loss = torch.tensor(0.0, requires_grad=True).to(device)
 
     for pos_pair in pos_pairs:
-        pos_sim = F.cosine_similarity(pos_pair[0], pos_pair[1])
-        neg_loss = torch.tensor(0.0, requires_grad=True).to(device)
+        assert isinstance(pos_pair, tuple) and len(pos_pair) == 2, "Each pos_pair should be a tuple of length 2"
+        pos_sim = F.cosine_similarity(pos_pair[0], pos_pair[1], dim=0)
+        pos_dist = s * (pos_sim - m)
         
+        neg_term = torch.tensor(0.0, requires_grad=True).to(device)
         for neg_pair in neg_pairs:
-            neg_loss = neg_loss + torch.exp(s * (F.cosine_similarity(pos_pair[0], neg_pair[1]) - m))
+            assert isinstance(neg_pair, tuple) and len(neg_pair) == 2, "Each neg_pair should be a tuple of length 2"
+            neg_sim = F.cosine_similarity(pos_pair[0], neg_pair[1], dim=0)
+            neg_term = neg_term + torch.exp(s * (neg_sim - m))
         
-        loss = loss + torch.log(torch.exp(s * (pos_sim - m)) / (torch.exp(s * (pos_sim - m)) + neg_loss))
-        loss = torch.mean(loss)
-    return loss
+        assert pos_dist.shape == neg_term.shape, f"Shape mismatch: pos_dist {pos_dist.shape}, neg_term {neg_term.shape}"
+        loss = loss + torch.log(torch.exp(pos_dist) / (torch.exp(pos_dist) + neg_term))
+        
+    assert len(pos_pairs) > 0, "pos_pairs should not be empty"
+    return torch.mean(-loss / len(pos_pairs)).requires_grad_()
+
+# def cosine_loss(pos_pairs, neg_pairs,  s=5.0,m=0.2): # We also set 𝑠 = 5 and 𝑚 = 0.2 in the cosine loss.
+#     loss = torch.tensor(0.0, requires_grad=True).to(device)
+
+#     for pos_pair in pos_pairs:
+#         pos_sim = F.cosine_similarity(pos_pair[0], pos_pair[1])
+#         neg_loss = torch.tensor(0.0, requires_grad=True).to(device)
+        
+#         for neg_pair in neg_pairs:
+#             neg_loss = neg_loss + torch.exp(s * (F.cosine_similarity(pos_pair[0], neg_pair[1]) - m))
+        
+#         loss = loss + torch.log(torch.exp(s * (pos_sim - m)) / (torch.exp(s * (pos_sim - m)) + neg_loss))
+#         loss = -torch.mean(loss)
+#     return loss
 
 '''
 Perceptual Losses (ℒ_per):
@@ -269,26 +286,26 @@ def train_base(cfg, Gbase, Dbase, dataloader, local_rank):
             # output_frame = F.interpolate(output_frame, size=(256, 256), mode='bilinear', align_corners=False)
 
             # Obtain the foreground mask for the target image
-            foreground_mask = get_foreground_mask(driving_frame)
+            # foreground_mask = get_foreground_mask(driving_frame)
             
             # Move the foreground mask to the same device as output_frame
-            foreground_mask = foreground_mask.to(output_frame.device)
+            # foreground_mask = foreground_mask.to(output_frame.device)
 
             # Multiply the predicted and target images with the foreground mask
-            masked_predicted_image = output_frame * foreground_mask
-            masked_target_image = driving_frame * foreground_mask
+            # masked_predicted_image = output_frame * foreground_mask
+            # masked_target_image = driving_frame * foreground_mask
                         
                                     
             # perceptual losses
-            perceptual_loss = perceptual_loss_fn(masked_predicted_image, masked_target_image)
+            perceptual_loss = perceptual_loss_fn(output_frame, driving_frame)
 
             # adversarial losses
-            real_pred = Dbase(masked_target_image)
-            fake_pred = Dbase(masked_predicted_image.detach())
+            # real_pred = Dbase(masked_target_image)
+            # fake_pred = Dbase(masked_predicted_image.detach())
 
-            loss_adv = GAN_loss(fake_pred, True, local_rank)
+            # loss_adv = GAN_loss(fake_pred, True, local_rank)
 
-            loss_fm = feature_matching_loss(fake_pred,real_pred, local_rank)
+            # loss_fm = feature_matching_loss(fake_pred,real_pred, local_rank)
  
             # feat_weights = 4.0 / (3 + 1)
             # D_weights = 1.0 / 3
@@ -318,14 +335,15 @@ def train_base(cfg, Gbase, Dbase, dataloader, local_rank):
             # Combine the losses
             # total_loss = cfg.training.w_per * perceptual_loss + cfg.training.w_adv * loss_adv + cfg.training.w_fm * loss_fm + cfg.training.w_cos * loss_cos + 10*dynamics_transfer_loss + 10*cosine_similar_loss
             
-            total_loss =  cfg.training.w_per * perceptual_loss + cfg.training.w_cos * loss_cos+ cfg.training.w_adv * loss_adv + cfg.training.w_fm * loss_fm 
+            total_loss =  cfg.training.w_per * perceptual_loss + cfg.training.w_cos * loss_cos 
+            # + cfg.training.w_adv * loss_adv + cfg.training.w_fm * loss_fm 
             # cfg.training.w_cos * loss_cos+ cfg.training.w_adv * loss_adv + cfg.training.w_fm * loss_fm 
             #  + cfg.training.w_adv * loss_adv + cfg.training.w_fm * loss_fm 
 
                 
-            loss_D_real = GAN_loss(real_pred, True, local_rank)
-            loss_D_fake = GAN_loss(fake_pred, False, local_rank)
-            loss_D = (loss_D_fake + loss_D_real) * 0.5
+            # loss_D_real = GAN_loss(real_pred, True, local_rank)
+            # loss_D_fake = GAN_loss(fake_pred, False, local_rank)
+            # loss_D = (loss_D_fake + loss_D_real) * 0.5
 
             scaler.scale(total_loss).backward(retain_graph=True)
             scaler.step(optimizer_G)
@@ -341,9 +359,9 @@ def train_base(cfg, Gbase, Dbase, dataloader, local_rank):
             # Backpropagate and update discriminator
             # loss_D.backward()
             # optimizer_D.step()
-            scaler.scale(loss_D).backward()
-            scaler.step(optimizer_D)
-            scaler.update()
+            # scaler.scale(loss_D).backward()
+            # scaler.step(optimizer_D)
+            # scaler.update()
             
                                 # Save the images
             # if save_images:
@@ -361,15 +379,15 @@ def train_base(cfg, Gbase, Dbase, dataloader, local_rank):
                              f"Step [{cur_step}/{total_step}], "
                              f"Loss_G: {total_loss.item():.4f}, "
                              f"Loss_per: {perceptual_loss.item():.4f}, "
-                             f"Loss_fm: {loss_fm.item():.4f}, "
+                            #  f"Loss_fm: {loss_fm.item():.4f}, "
                              f"Loss_cos: {loss_cos.item():.4f}, "
-                             f"Loss_adv: {loss_adv.item():.4f}, "
+                            #  f"Loss_adv: {loss_adv.item():.4f}, "
                             #  f"Loss_cosine: {cosine_similar_loss.item():.4f}, "
                             #  f"Loss_dyn_transfer: {dynamics_transfer_loss.item():.4f}, "
-                             f"Loss_D: {loss_D.item():.4f}, "
+                            #  f"Loss_D: {loss_D.item():.4f}, "
                              )
                 
-            if cur_step % 50 == 0 and dist.get_rank() == 0:
+            if cur_step % 10 == 0 and dist.get_rank() == 0:
                 # saved_img_all = Image.fromarray(saved_wandb)
                 # saved_img_all.save(f"output_images/train_dataset/all_{cur_step}.png")
                 vutils.save_image(output_frame, f"output_images/train_dataset_cross/output_imgs/{cur_step}.png")
@@ -377,25 +395,25 @@ def train_base(cfg, Gbase, Dbase, dataloader, local_rank):
                 vutils.save_image(source_frame, f"output_images/train_dataset_cross/source_imgs/{cur_step}.png")
                 vutils.save_image(driving_frame, f"output_images/train_dataset_cross/driving_imgs/{cur_step}.png")
                 vutils.save_image(s_start_d_pred, f"output_images/train_dataset_cross/s_start_d_pred/{cur_step}.png")
-
+                vutils.save_image(random_driving_frame, f"output_images/train_dataset_cross/random_driving/{cur_step}.png")
 
             # Img = wandb.Image(saved_wandb, caption="source driver result masked_driving masked_result") 
             # wandb.log({"frames and results": Img}, step=cur_step)
     
             wandb.log({"Loss_G": total_loss.item(),
-                        "Loss_fm": loss_fm.item(),
+                        # "Loss_fm": loss_fm.item(),
                         "Loss_per": perceptual_loss.item(),
                         "Loss_cos": loss_cos.item(),
-                        "Loss_adv": loss_adv.item(),
+                        # "Loss_adv": loss_adv.item(),
                         # "Loss_dyn_transfer": dynamics_transfer_loss.item(),
                         # "Loss_cosine": cosine_similar_loss.item(),
-                        "Loss_D": loss_D.item()
+                        # "Loss_D": loss_D.item()
                     }, 
                     step=cur_step)
             # batch = prefetcher.next()
-        # Update learning rates
-        scheduler_G.step()
-        scheduler_D.step()
+            # Update learning rates
+            scheduler_G.step()
+            scheduler_D.step()
 
         # Log and save checkpoints
         if (epoch + 1) % cfg.training.save_interval == 0 and dist.get_rank() == 0:
@@ -423,15 +441,15 @@ def main(cfg: OmegaConf) -> None:
         "batch_size": cfg.training.batch_size,
         "device" : device 
     }
-    wandb.init(project="VASA-ddp", entity="marvin_tec", name="dist-v0-253", config=config, settings=wandb.Settings(start_method="fork"))
+    wandb.init(project="Disentanglement", entity="marvin_tec", name="ddp-v1-2loss", config=config, settings=wandb.Settings(start_method="fork"))
     
     parser = argparse.ArgumentParser()
 
 
     # parser.add_argument('--world-size', default=4, type=int, help='number of distributed processes')
     parser.add_argument('--local_rank', default=-1, type=int, help='rank of distributed processes')
-    parser.add_argument('--Gbase_path', default='checkpoints/Gbase/Gbase_alldata_epoch150.pth', type=str, help='resume Gbase ckpt')
-    parser.add_argument('--Dbase_path', default='checkpoints/Dbase/Dbase_alldata_epoch150.pth', type=str, help='resume Dbase ckpt')
+    parser.add_argument('--Gbase_path', default='checkpoints/Gbase/Gbase_cross_id_epoch1.pth', type=str, help='resume Gbase ckpt')
+    parser.add_argument('--Dbase_path', default='checkpoints/Dbase/Dbase_cross_id_epoch1.pth', type=str, help='resume Dbase ckpt')
     args = parser.parse_args()
     local_rank = args.local_rank
 
@@ -450,8 +468,8 @@ def main(cfg: OmegaConf) -> None:
         transforms.ToTensor(),
         transforms.Resize((256, 256)),
         # transforms.Normalize([0.5], [0.5]),
-        # transforms.RandomHorizontalFlip(),
-        # transforms.ColorJitter()
+        transforms.RandomHorizontalFlip(),
+        transforms.ColorJitter()
     ])
   #     transforms.RandomHorizontalFlip(),
    #     transforms.ColorJitter() # "as augmentation for both source and target images, we use color jitter and random flip"
@@ -482,20 +500,22 @@ def main(cfg: OmegaConf) -> None:
     Gbase = model.Gbase(is_train=True, local_rank=device_id).to(device_id)
     Dbase = model.MultiscaleDiscriminator(input_nc=3, getIntermFeat=True).to(device_id) # 🤷
 
-    # if dist.get_rank() == 0 and args.Gbase_path is not None and args.Dbase_path is not None :
-    #     Gbase.load_state_dict(torch.load(args.Gbase_path))
-    #     Dbase.load_state_dict(torch.load(args.Dbase_path))
+    if args.Gbase_path is not None and args.Dbase_path is not None :
+        Gbase.load_state_dict(torch.load(args.Gbase_path, map_location='cuda:{}'.format(device_id)))
+        Dbase.load_state_dict(torch.load(args.Dbase_path, map_location='cuda:{}'.format(device_id)))
+        print('success load pretrained model')
 
     Gbase = torch.nn.SyncBatchNorm.convert_sync_batchnorm(Gbase) 
     # Gbase = DDP(Gbase, device_ids=[device_id], output_device=device_id, find_unused_parameters=True)
     Gbase = DDP(Gbase, find_unused_parameters=True, broadcast_buffers=False)
-
+    # Gbase.load_state_dict(torch.load(args.Gbase_path))
     # Gbase.load_state_dict(torch.load("checkpoints/Gbase/Gbase_alldata_epoch120.pth"))
     ## 注意要使用find_unused_parameters=True，因为有时候模型里面定义的一些模块 在forward函数里面没有调用，如果不使用find_unused_parameters=True 会报错
     Dbase = torch.nn.SyncBatchNorm.convert_sync_batchnorm(Dbase) 
     # model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.local_rank], output_device=args.local_rank, find_unused_parameters=True) 
     # Dbase = DDP(Dbase, device_ids=[device_id], output_device=device_id, find_unused_parameters=True)
     Dbase = DDP(Dbase, find_unused_parameters=True, broadcast_buffers=False)
+    # Dbase.load_state_dict(torch.load(args.Dbase_path))
     # Dbase.load_state_dict(torch.load('checkpoints/Dbase/Dbase_alldata_epoch150.pth'))
 
 
