@@ -28,6 +28,7 @@ from torchvision.transforms.functional import to_pil_image, to_tensor
 from PIL import Image
 from skimage.transform import PiecewiseAffineTransform, warp
 import face_recognition
+import lpips
 
 
 from mysixdrepnet import SixDRepNet_Detector
@@ -1857,6 +1858,7 @@ class PerceptualLoss(nn.Module):
         super(PerceptualLoss, self).__init__()
         self.device = device
         self.weights = weights
+        self.lpips_loss = lpips.LPIPS(net='vgg').to(device)
 
         # VGG19 network
         vgg19 = models.vgg19(pretrained=True).features
@@ -1875,6 +1877,7 @@ class PerceptualLoss(nn.Module):
         predicted = self.normalize_input(predicted)
         target = self.normalize_input(target)
 
+        lpips_loss = self.compute_lpips_loss(predicted, target)
         # Compute VGG19 perceptual loss
         vgg19_loss = self.compute_vgg19_loss(predicted, target)
 
@@ -1888,15 +1891,19 @@ class PerceptualLoss(nn.Module):
         total_loss = (
             self.weights['vgg19'] * vgg19_loss +
             self.weights['vggface'] * vggface_loss +
-            self.weights['gaze'] * 1 #gaze_loss
+            # self.weights['gaze'] * 1 #gaze_loss
+            self.weights['lpips_loss'] * lpips_loss
         )
 
-        if use_fm_loss:
-            # Compute feature matching loss
-            fm_loss = self.compute_feature_matching_loss(predicted, target)
-            total_loss += fm_loss
+        # if use_fm_loss:
+        #     # Compute feature matching loss
+        #     fm_loss = self.compute_feature_matching_loss(predicted, target)
+        #     total_loss += fm_loss
+        return vgg19_loss, vggface_loss, lpips_loss
+        # return total_loss
 
-        return total_loss
+    def compute_lpips_loss(self, perdicted, target):
+        return self.lpips_loss(perdicted, target).mean()
 
     def compute_vgg19_loss(self, predicted, target):
         return self.compute_perceptual_loss(self.vgg19, self.vgg19_layers, predicted, target)
