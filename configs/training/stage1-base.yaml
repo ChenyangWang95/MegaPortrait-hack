@@ -48,4 +48,6 @@ training:
   w_adv: 1   # adversarial loss
   w_fm: 40   # feature matching loss
   w_cos: 2   # cycle consistency loss
-
+  w_face: 4
+  w_lpips: 20
+  w_gaze: 5

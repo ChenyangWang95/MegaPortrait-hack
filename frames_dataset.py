@@ -78,12 +78,16 @@ class FramesDataset(Dataset):
         self.root_dir = root_dir
         self.videos = []
 
-        for root, dirs, names in os.walk(root_dir):
-            for name in names:
-                ext = os.path.splitext(name)[1]  # 获取后缀名
-                if ext == '.mp4':
-                    fromdir = os.path.join(root, name)  # mp4文件原始地址
-                    self.videos.append(fromdir)
+        # for root, dirs, names in os.walk(root_dir):
+        #     for name in names:
+        #         ext = os.path.splitext(name)[1]  # 获取后缀名
+        #         if ext == '.mp4':
+        #             fromdir = os.path.join(root, name)  # mp4文件原始地址
+        #             self.videos.append(fromdir)
+        videos = os.listdir("/home/chenyang/DataSet/vox/train")
+        for v in videos:
+            videos_path = os.path.join("/home/chenyang/DataSet/vox/train", v)
+            self.videos.append(videos_path)
         # for debug
         # videos = os.listdir('junk/test')
         # for video in videos:

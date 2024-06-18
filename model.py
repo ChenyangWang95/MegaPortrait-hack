@@ -29,7 +29,7 @@ from PIL import Image
 from skimage.transform import PiecewiseAffineTransform, warp
 import face_recognition
 import lpips
-
+from gazenet import get_gaze_model
 
 from mysixdrepnet import SixDRepNet_Detector
 # Set this flag to True for DEBUG mode, False for INFO mode
@@ -1859,7 +1859,7 @@ class PerceptualLoss(nn.Module):
         self.device = device
         self.weights = weights
         self.lpips_loss = lpips.LPIPS(net='vgg').to(device)
-
+        self.gaze_model = get_gaze_model()
         # VGG19 network
         vgg19 = models.vgg19(pretrained=True).features
         self.vgg19 = nn.Sequential(*[vgg19[i] for i in range(30)]).to(device).eval()
@@ -1885,21 +1885,21 @@ class PerceptualLoss(nn.Module):
         vggface_loss = self.compute_vggface_loss(predicted, target)
 
         # Compute gaze loss
-        # gaze_loss = self.gaze_loss(predicted, target)
+        gaze_loss = self.compute_gaze_loss(predicted, target)
 
         # Compute total perceptual loss
-        total_loss = (
-            self.weights['vgg19'] * vgg19_loss +
-            self.weights['vggface'] * vggface_loss +
-            # self.weights['gaze'] * 1 #gaze_loss
-            self.weights['lpips_loss'] * lpips_loss
-        )
+        # total_loss = (
+        #     self.weights['vgg19'] * vgg19_loss +
+        #     self.weights['vggface'] * vggface_loss +
+        #     # self.weights['gaze'] * 1 #gaze_loss
+        #     self.weights['lpips_loss'] * lpips_loss
+        # )
 
         # if use_fm_loss:
         #     # Compute feature matching loss
         #     fm_loss = self.compute_feature_matching_loss(predicted, target)
         #     total_loss += fm_loss
-        return vgg19_loss, vggface_loss, lpips_loss
+        return vgg19_loss, vggface_loss, lpips_loss, gaze_loss
         # return total_loss
 
     def compute_lpips_loss(self, perdicted, target):
@@ -1948,6 +1948,14 @@ class PerceptualLoss(nn.Module):
                     loss += tmp
 
         return loss
+
+    def compute_gaze_loss(self, predicted, target):
+        gaze_pred = self.gaze_model.get_gaze(predicted)
+        gaze_gt = self.gaze_model.get_gaze(target)
+        batch_size = predicted.shape[0]
+        gaze_loss = sum(torch.norm(gaze_pred - gaze_gt, dim=1))/batch_size
+
+        return gaze_loss
 
     def normalize_input(self, x):
         mean = torch.tensor([0.485, 0.456, 0.406], device=self.device).view(1, 3, 1, 1)
@@ -2113,98 +2121,90 @@ def get_foreground_mask(model, images, local_rank):
 #     def forward(self, x):
 #         return self.model(x)
 
+class DownBlock2d(nn.Module):
+    """
+    Simple block for processing video (encoder).
+    """
+
+    def __init__(
+        self, in_features, out_features, norm=False, kernel_size=4, pool=False, sn=False
+    ):
+        super(DownBlock2d, self).__init__()
+        self.conv = nn.Conv2d(
+            in_channels=in_features, out_channels=out_features, kernel_size=kernel_size
+        )
+
+        if sn:
+            self.conv = nn.utils.spectral_norm(self.conv)
+
+        if norm:
+            self.norm = nn.InstanceNorm2d(out_features, affine=True)
+        else:
+            self.norm = None
+        self.pool = pool
+
+    def forward(self, x):
+        out = x
+        out = self.conv(out)
+        if self.norm:
+            out = self.norm(out)
+        out = F.leaky_relu(out, 0.2)
+        if self.pool:
+            out = F.avg_pool2d(out, (2, 2))
+        return out
+    
+class SingleScaleDiscriminator(nn.Module):
+    def __init__(self, in_channels=3, block_expansion=64, num_blocks=4, max_features=512, sn=False):
+        super(SingleScaleDiscriminator, self).__init__()
+
+        down_blocks = []
+        for i in range(num_blocks):
+            down_blocks.append(
+                DownBlock2d(
+                    in_channels * 2 if i == 0 else min(max_features, block_expansion * (2 ** i)),
+                    min(max_features, block_expansion * (2 ** (i + 1))),
+                    norm=(i != 0),
+                    kernel_size=4,
+                    pool=(i != num_blocks - 1),
+                    sn=sn,
+                )
+            )
+
+        self.down_blocks = nn.ModuleList(down_blocks)
+        self.conv = nn.Conv2d(
+            self.down_blocks[-1].conv.out_channels, out_channels=1, kernel_size=1
+        )
+        if sn:
+            self.conv = nn.utils.spectral_norm(self.conv)
+
+    def forward(self, img_A, img_B):
+        # Concatenate image and condition image by channels to produce input
+        img_input = torch.cat((img_A, img_B), 1)
+        out = img_input
+
+        for down_block in self.down_blocks:
+            out = down_block(out)
+
+        return self.conv(out)
+
 
 class MultiscaleDiscriminator(nn.Module):
-    def __init__(self, input_nc, ndf=64, n_layers=3, norm_layer=nn.BatchNorm2d, 
-                 use_sigmoid=False, num_D=3, getIntermFeat=False):
+    def __init__(self, in_channels=3, num_scales=3, block_expansion=64, num_blocks=4, max_features=512, sn=False):
         super(MultiscaleDiscriminator, self).__init__()
-        self.num_D = num_D
-        self.n_layers = n_layers
-        self.getIntermFeat = getIntermFeat
-     
-        for i in range(num_D):
-            netD = NLayerDiscriminator(input_nc, ndf, n_layers, norm_layer, use_sigmoid, getIntermFeat)
-            if getIntermFeat:                                
-                for j in range(n_layers+2):
-                    setattr(self, 'scale'+str(i)+'_layer'+str(j), getattr(netD, 'model'+str(j)))                                   
-            else:
-                setattr(self, 'layer'+str(i), netD.model)
-
+        self.num_scales = num_scales
+        self.discriminators = nn.ModuleList([
+            SingleScaleDiscriminator(in_channels, block_expansion, num_blocks, max_features, sn)
+            for _ in range(num_scales)
+        ])
         self.downsample = nn.AvgPool2d(3, stride=2, padding=[1, 1], count_include_pad=False)
 
-    def singleD_forward(self, model, input):
-        if self.getIntermFeat:
-            result = [input]
-            for i in range(len(model)):
-                result.append(model[i](result[-1]))
-            return result[1:]
-        else:
-            return [model(input)]
-
-    def forward(self, input):        
-        num_D = self.num_D
-        result = []
-        input_downsampled = input
-        for i in range(num_D):
-            if self.getIntermFeat:
-                model = [getattr(self, 'scale'+str(num_D-1-i)+'_layer'+str(j)) for j in range(self.n_layers+2)]
-            else:
-                model = getattr(self, 'layer'+str(num_D-1-i))
-            result.append(self.singleD_forward(model, input_downsampled))
-            if i != (num_D-1):
-                input_downsampled = self.downsample(input_downsampled)
-        return result
-
-class NLayerDiscriminator(nn.Module):
-    def __init__(self, input_nc, ndf=64, n_layers=3, norm_layer=nn.BatchNorm2d, use_sigmoid=False, getIntermFeat=False):
-        super(NLayerDiscriminator, self).__init__()
-        self.getIntermFeat = getIntermFeat
-        self.n_layers = n_layers
-
-        kw = 4
-        padw = int(np.ceil((kw-1.0)/2))
-        sequence = [[nn.Conv2d(input_nc, ndf, kernel_size=kw, stride=2, padding=padw), nn.LeakyReLU(0.2, True)]]
-
-        nf = ndf
-        for n in range(1, n_layers):
-            nf_prev = nf
-            nf = min(nf * 2, 512)
-            sequence += [[
-                nn.Conv2d(nf_prev, nf, kernel_size=kw, stride=2, padding=padw),
-                norm_layer(nf), nn.LeakyReLU(0.2, True)
-            ]]
-
-        nf_prev = nf
-        nf = min(nf * 2, 512)
-        sequence += [[
-            nn.Conv2d(nf_prev, nf, kernel_size=kw, stride=1, padding=padw),
-            norm_layer(nf),
-            nn.LeakyReLU(0.2, True)
-        ]]
-
-        sequence += [[nn.Conv2d(nf, 1, kernel_size=kw, stride=1, padding=padw)]]
-
-        if use_sigmoid:
-            sequence += [[nn.Sigmoid()]]
-
-        if getIntermFeat:
-            for n in range(len(sequence)):
-                setattr(self, 'model'+str(n), nn.Sequential(*sequence[n]))
-        else:
-            sequence_stream = []
-            for n in range(len(sequence)):
-                sequence_stream += sequence[n]
-            self.model = nn.Sequential(*sequence_stream)
-
-    def forward(self, input):
-        if self.getIntermFeat:
-            res = [input]
-            for n in range(self.n_layers+2):
-                model = getattr(self, 'model'+str(n))
-                res.append(model(res[-1]))
-            return res[1:]
-        else:
-            return self.model(input)
+    def forward(self, img_A, img_B):
+        results = []
+        for discriminator in self.discriminators:
+            results.append(discriminator(img_A, img_B))
+            img_A = self.downsample(img_A)
+            img_B = self.downsample(img_B)
+        return results
 
 class Discriminator(nn.Module):
     def __init__(self, in_channels=3):
