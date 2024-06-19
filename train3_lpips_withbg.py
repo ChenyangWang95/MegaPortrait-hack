@@ -4,6 +4,7 @@ import model
 import cv2 as cv
 import numpy as np
 import torch.nn as nn
+from torch import autograd
 from PIL import Image
 from torch.utils.data import DataLoader
 from torchvision import transforms
@@ -120,6 +121,9 @@ def mse_loss(img1, img2):
     loss = F.mse_loss(img1, img2)
     return loss.mean()
 
+def g_nonsaturating_loss(fake_pred):
+    loss = F.softplus(-fake_pred).mean()
+    return loss
 
 def save_img(inp):
     
@@ -134,6 +138,11 @@ def save_img(inp):
     save = np.concatenate(save_list, axis=1)
     
     return save
+
+def d_r1_loss(real_pred, real_img):
+    grad_real, = autograd.grad(outputs=real_pred.sum(), inputs=real_img, create_graph=True)
+    grad_penalty = grad_real.pow(2).reshape(grad_real.shape[0], -1).sum(1).mean()
+    return grad_penalty
 
 def cosine_loss(pos_pairs, neg_pairs, s=5.0, m=0.2):
     assert isinstance(pos_pairs, list) and isinstance(neg_pairs, list), "pos_pairs and neg_pairs should be lists"
@@ -161,6 +170,16 @@ def cosine_loss(pos_pairs, neg_pairs, s=5.0, m=0.2):
     assert len(pos_pairs) > 0, "pos_pairs should not be empty"
     return torch.mean(-loss / len(pos_pairs)).requires_grad_()
 
+def d_logistic_loss(real_pred, fake_pred):
+    real_loss = F.softplus(-real_pred)
+    fake_loss = F.softplus(fake_pred)
+    return real_loss.mean() + fake_loss.mean()
+
+
+def requires_grad(model, flag=True):
+    for p in model.parameters():
+        p.requires_grad = flag
+
 
 def train_base(cfg, Gbase, Dbase, dataloader, local_rank):
     # Load the pre-trained DeepLabV3 model
@@ -184,7 +203,7 @@ def train_base(cfg, Gbase, Dbase, dataloader, local_rank):
     hinge_loss = nn.L1Loss()
     # d_loss = nn.MSELoss()
     # fm_loss_func = nn.L1Loss()
-    # feature_matching_loss = nn.MSELoss()
+    feature_matching_loss = nn.MSELoss()
     
     cur_step = begin_epoch*len(dataloader)
 
@@ -207,7 +226,10 @@ def train_base(cfg, Gbase, Dbase, dataloader, local_rank):
             # random_driving_frame_mask = random_driving_frame * foreground_mask_list[3]
 
             
+
             with autocast():
+                requires_grad(Gbase, True)
+                requires_grad(Dbase, False)
                 output_frame = Gbase(source_frame, driving_frame, same_subject=False)
 
                 # mask for perception loss
@@ -215,16 +237,14 @@ def train_base(cfg, Gbase, Dbase, dataloader, local_rank):
                 # loss_G_per = perceptual_loss_fn(output_frame_mask, driving_frame_mask)
                 vgg19_loss, vggface_loss, lpips_loss, gaze_loss = perceptual_loss_fn(output_frame, driving_frame)
 
-
+                # valid = Variable(torch.Tensor(np.ones((driving_frame.size(0), *patch))), requires_grad=False).to(device)
+                # fake = Variable(torch.Tensor(np.ones((driving_frame.size(0), *patch))), requires_grad=False).to(device)
 
                 # real loss
-                real_preds = Dbase(driving_frame, source_frame)
-                fake_preds = Dbase(output_frame.detach(), source_frame)
-
-                valid_list = [Variable(torch.Tensor(np.ones(pred.shape)).to(device), requires_grad=False) for pred in real_preds]
-                # fake_list = [Variable(torch.Tensor(-1 * np.ones(pred.shape)).to(device), requires_grad=False) for pred in fake_preds]
-
-                loss_G_adv = sum([hinge_loss(fake_pred, valid) for fake_pred, valid in zip(fake_preds, valid_list)])
+                # real_pred = Dbase(driving_frame, source_frame)
+                fake_pred = Dbase(output_frame.detach(), source_frame)
+                # loss_G_adv = hinge_loss(fake_pred, valid)
+                loss_G_adv = g_nonsaturating_loss(fake_pred)
                 # loss_fake = sum([hinge_loss(fake_pred, fake) for fake_pred, fake in zip(fake_preds, fake_list)])
                 
                 # loss_G_adv = 0.5 * (loss_real + loss_fake)
@@ -247,21 +267,41 @@ def train_base(cfg, Gbase, Dbase, dataloader, local_rank):
                             cfg.training.w_face * vggface_loss + \
                             cfg.training.w_lpips * lpips_loss + \
                             cfg.training.w_cos * loss_G_cos + \
-                            cfg.training.w_adv * loss_G_adv + \
+                            cfg.training.w_adv * loss_G_adv +\
                             cfg.training.w_gaze * gaze_loss
-
-                loss_D = multiscale_discriminator_loss(real_preds, fake_preds, loss_type='lsgan')
+                            # cfg.training.w_fm * loss_fm
+                            
+                
 
                 optimizer_G.zero_grad()
                 scaler.scale(total_loss).backward(retain_graph=True)
+                nn.utils.clip_grad_norm_(Gbase.parameters(), max_norm=1, norm_type=2)
                 scaler.step(optimizer_G)
                 scaler.update()
 
+                requires_grad(Gbase, False)
+                requires_grad(Dbase, True)
+                real_pred = Dbase(driving_frame, source_frame)
+                fake_pred = Dbase(output_frame.detach(), source_frame)
+                # loss_D = discriminator_loss(real_pred, fake_pred, loss_type='vanilla')
+                loss_D = d_logistic_loss(real_pred, fake_pred)
                 # Train discriminator
                 optimizer_D.zero_grad()
-                scaler.scale(loss_D).backward(retain_graph=True)
+                scaler.scale(loss_D).backward()
                 scaler.step(optimizer_D)
                 scaler.update()
+
+                # if cur_step % 16 == 0:
+                #     driving_frame.requires_grad = True
+                #     source_frame.requires_grad = True
+                #     real_pred = Dbase(driving_frame, source_frame)
+                #     r1_loss = d_r1_loss(real_pred, driving_frame)
+                #     Dbase.zero_grad()
+                #     d_loss_other = 5 / 2 * r1_loss * 16+ 0 * real_pred[0]
+                #     print(d_loss_other)
+                #     quit()
+                #     scaler.scale(d_loss_other).backward()
+                #     scaler.step(optimizer_D)
                 
 
                 if cur_step % 5 ==0 and dist.get_rank() == 0:
@@ -280,7 +320,7 @@ def train_base(cfg, Gbase, Dbase, dataloader, local_rank):
                                 f"Loss_D: {loss_D.item():.4f}, "
                                 )
 
-                if cur_step % 10 == 0 and dist.get_rank() == 0:
+                if cur_step % 100 == 0 and dist.get_rank() == 0:
                     img_save = torch.cat([source_frame, random_source_frame, driving_frame, output_frame, s_start_d_pred], dim=-1)
 
                     vutils.save_image(img_save, f"output_images/lpips_withbg_hrdata/{cur_step}.png")
@@ -305,8 +345,8 @@ def train_base(cfg, Gbase, Dbase, dataloader, local_rank):
 
         # Log and save checkpoints
         if (epoch + 1) % cfg.training.save_interval == 0 and dist.get_rank() == 0:
-            torch.save(Gbase.module.state_dict(), f"checkpoints/Gbase/Gbase_lpips_toy_withbg_nofm_epoch{epoch+1}.pth")
-            torch.save(Dbase.module.state_dict(), f"checkpoints/Dbase/Dbase_lpips_toy_withbg_nofm_epoch{epoch+1}.pth")
+            torch.save(Gbase.module.state_dict(), f"checkpoints/Gbase/Gbase_hr_epoch{epoch+1}.pth")
+            torch.save(Dbase.module.state_dict(), f"checkpoints/Dbase/Dbase_hr_epoch{epoch+1}.pth")
 
 def set_seed():
     seed = np.random.randint(1, 10000)
@@ -323,9 +363,9 @@ def main(cfg: OmegaConf) -> None:
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--local_rank', default=-1, type=int, help='rank of distributed processes')
-    parser.add_argument('--Gbase_path', default='checkpoints/Gbase/Gbase_lpips_epoch200.pth', type=str, help='resume Gbase ckpt')
-    parser.add_argument('--Dbase_path', default='checkpoints/Dbase/Dbase_lpips_epoch200.pth', type=str, help='resume Dbase ckpt')
-    parser.add_argument('--resume', default=False, help='Resume FLag')
+    parser.add_argument('--Gbase_path', default='checkpoints/Gbase/Gbase_hr_epoch4695.pth', type=str, help='resume Gbase ckpt')
+    parser.add_argument('--Dbase_path', default='checkpoints/Dbase/Dbase_hr_epoch4690.pth', type=str, help='resume Dbase ckpt')
+    parser.add_argument('--resume', default=True, help='Resume FLag')
 
     args = parser.parse_args()
     local_rank = args.local_rank
@@ -364,7 +404,7 @@ def main(cfg: OmegaConf) -> None:
 
 
     Gbase = model.Gbase(is_train=True, local_rank=device_id).to(device_id)
-    Dbase = model.MultiscaleDiscriminator().to(device_id) # 🤷
+    Dbase = model.Discriminator().to(device_id) # 🤷
 
     if args.resume and args.Gbase_path is not None and args.Dbase_path is not None :
         Gbase.load_state_dict(torch.load(args.Gbase_path, map_location='cuda:{}'.format(device_id)))
