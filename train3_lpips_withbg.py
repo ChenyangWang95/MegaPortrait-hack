@@ -37,7 +37,7 @@ import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 import wandb
-os.environ['WANDB_MODE'] = 'offline' # for debug
+# os.environ['WANDB_MODE'] = 'offline' # for debug
 
 
 # Create a directory to save the images (if it doesn't already exist)
@@ -181,7 +181,7 @@ def requires_grad(model, flag=True):
         p.requires_grad = flag
 
 
-def train_base(cfg, Gbase, Dbase, dataloader, local_rank):
+def train_base(cfg, Gbase, Dbase, dataloader, local_rank, optimizer_G, optimizer_D, scheduler_G, scheduler_D, begin_epoch):
     # Load the pre-trained DeepLabV3 model
     # seg_model = models.segmentation.deeplabv3_resnet101(pretrained=True).to(local_rank)
     # seg_model.eval()
@@ -189,13 +189,8 @@ def train_base(cfg, Gbase, Dbase, dataloader, local_rank):
     Gbase.train()
     Dbase.train()
 
-    begin_epoch = 0
     total_epoch = int(cfg.training.base_iterations / (len(dataloader)))+1
 
-    optimizer_G = torch.optim.AdamW(Gbase.parameters(), lr=cfg.training.lr, betas=(0.5, 0.999), weight_decay=1e-2)
-    optimizer_D = torch.optim.AdamW(Dbase.parameters(), lr=cfg.training.lr, betas=(0.5, 0.999), weight_decay=1e-2)
-    scheduler_G = CosineAnnealingLR(optimizer_G, T_max=total_epoch, eta_min=1e-6)
-    scheduler_D = CosineAnnealingLR(optimizer_D, T_max=total_epoch, eta_min=1e-6)
     
     perceptual_loss_fn = PerceptualLoss(local_rank, weights={'vgg19': 20.0, 'vggface': 4.0, 'gaze': 5.0, 'lpips_loss': 20.0})
     # GAN_loss = GANLoss()
@@ -320,10 +315,11 @@ def train_base(cfg, Gbase, Dbase, dataloader, local_rank):
                                 f"Loss_D: {loss_D.item():.4f}, "
                                 )
 
-                if cur_step % 100 == 0 and dist.get_rank() == 0:
-                    img_save = torch.cat([source_frame, random_source_frame, driving_frame, output_frame, s_start_d_pred], dim=-1)
+                if cur_step % 50 == 0 and dist.get_rank() == 0:
+                    img_save = torch.cat([source_frame, random_source_frame, driving_frame, output_frame, s_start_d_pred], dim=-2)
 
-                    vutils.save_image(img_save, f"output_images/lpips_withbg_hrdata/{cur_step}.png")
+                    vutils.save_image(img_save, f"output_images/withbg_hrdata_refine_gan/{cur_step}.png")
+                    del img_save
                 if dist.get_rank() == 0:
                     wandb.log({"Loss_G": total_loss.item(),
                                 "Loss_per": vgg19_loss.item(),
@@ -345,8 +341,17 @@ def train_base(cfg, Gbase, Dbase, dataloader, local_rank):
 
         # Log and save checkpoints
         if (epoch + 1) % cfg.training.save_interval == 0 and dist.get_rank() == 0:
-            torch.save(Gbase.module.state_dict(), f"checkpoints/Gbase/Gbase_hr_epoch{epoch+1}.pth")
-            torch.save(Dbase.module.state_dict(), f"checkpoints/Dbase/Dbase_hr_epoch{epoch+1}.pth")
+            state_G = {'epoch': epoch,
+                    'model': Gbase.module.state_dict(),
+                    'optimizer': optimizer_G.state_dict(),
+                    'scheduler': scheduler_G.state_dict()}
+            state_D = {'epoch': epoch,
+                    'model': Dbase.module.state_dict(),
+                    'optimizer': optimizer_D.state_dict(),
+                    'scheduler': scheduler_D.state_dict()}
+
+            torch.save(state_G, f"checkpoints/Gbase/G_base_EP{epoch+1}.pth")
+            torch.save(state_D, f"checkpoints/Dbase/D_base_EP{epoch+1}.pth")
 
 def set_seed():
     seed = np.random.randint(1, 10000)
@@ -363,8 +368,8 @@ def main(cfg: OmegaConf) -> None:
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--local_rank', default=-1, type=int, help='rank of distributed processes')
-    parser.add_argument('--Gbase_path', default='checkpoints/Gbase/Gbase_hr_epoch4695.pth', type=str, help='resume Gbase ckpt')
-    parser.add_argument('--Dbase_path', default='checkpoints/Dbase/Dbase_hr_epoch4690.pth', type=str, help='resume Dbase ckpt')
+    parser.add_argument('--Gbase_path', default='checkpoints/Gbase/G_base_EP2.pth', type=str, help='resume Gbase ckpt')
+    parser.add_argument('--Dbase_path', default='checkpoints/Dbase/D_base_EP2.pth', type=str, help='resume Dbase ckpt')
     parser.add_argument('--resume', default=True, help='Resume FLag')
 
     args = parser.parse_args()
@@ -385,9 +390,9 @@ def main(cfg: OmegaConf) -> None:
         "device" : device 
     }
     if dist.get_rank() ==0:
-        wandb.init(project="Disentanglement-ddp", entity="marvin_tec", name="gaze", config=config, settings=wandb.Settings(start_method="fork"))
+        wandb.init(project="Disentanglement-ddp", entity="marvin_tec", name="gaze_refined_D", config=config, settings=wandb.Settings(start_method="fork"))
     
-
+    
     transform = transforms.Compose([
         
         transforms.ToTensor(),
@@ -402,13 +407,30 @@ def main(cfg: OmegaConf) -> None:
                             pin_memory=True, num_workers=cfg.training.num_workers, 
                             sampler=train_sampler)
 
+    total_epoch = int(cfg.training.base_iterations / (len(dataloader)))+1
 
     Gbase = model.Gbase(is_train=True, local_rank=device_id).to(device_id)
     Dbase = model.Discriminator().to(device_id) # 🤷
+    optimizer_G = torch.optim.AdamW(Gbase.parameters(), lr=cfg.training.lr, betas=(0.5, 0.999), weight_decay=1e-2)
+    optimizer_D = torch.optim.AdamW(Dbase.parameters(), lr=cfg.training.lr, betas=(0.5, 0.999), weight_decay=1e-2)
+    scheduler_G = CosineAnnealingLR(optimizer_G, T_max=total_epoch, eta_min=1e-6)
+    scheduler_D = CosineAnnealingLR(optimizer_D, T_max=total_epoch, eta_min=1e-6)
 
-    if args.resume and args.Gbase_path is not None and args.Dbase_path is not None :
-        Gbase.load_state_dict(torch.load(args.Gbase_path, map_location='cuda:{}'.format(device_id)))
-        Dbase.load_state_dict(torch.load(args.Dbase_path, map_location='cuda:{}'.format(device_id)))
+
+    if args.resume and args.Gbase_path is not None and args.Dbase_path is not None:
+        G_ckpt = torch.load(args.Gbase_path, map_location='cpu')
+        D_ckpt = torch.load(args.Dbase_path, map_location='cpu')
+        epoch = G_ckpt['epoch']
+        Gbase.load_state_dict(G_ckpt['model'])
+        Dbase.load_state_dict(D_ckpt['model'])
+        optimizer_G.load_state_dict(G_ckpt['optimizer'])
+        optimizer_D.load_state_dict(D_ckpt['optimizer'])
+
+        # optimizer_G.param_groups[0]['capturable'] = True
+        # optimizer_D.param_groups[0]['capturable'] = True
+        
+        scheduler_G.load_state_dict(G_ckpt['scheduler'])
+        scheduler_D.load_state_dict(D_ckpt['scheduler'])
         print('success load pretrained model')
 
     Gbase = torch.nn.SyncBatchNorm.convert_sync_batchnorm(Gbase) 
@@ -418,8 +440,8 @@ def main(cfg: OmegaConf) -> None:
     Dbase = DDP(Dbase, find_unused_parameters=True, broadcast_buffers=False)
 
 
-    train_base(cfg, Gbase, Dbase, dataloader, local_rank=device_id)  
-    torch.save(Gbase.state_dict(), 'Gbase_cross_final.pth')
+    train_base(cfg, Gbase, Dbase, dataloader, device_id, optimizer_G, optimizer_D, scheduler_G, scheduler_D, epoch)  
+    # torch.save(Gbase.state_dict(), 'Gbase_cross_final.pth')
 
 
 if __name__ == "__main__":
