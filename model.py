@@ -1070,16 +1070,16 @@ class Gbase(nn.Module):
         vd, ed, Rd, td, zd = att_d
 
         # D(vd, ed, Rs, ts, zd)        
-        w_s2c1 = self.warp_generator_s2c(Rs, ts, zd, ed)
+        w_s2c1 = self.warp_generator_s2c(Rd, td, zd, ed)
         vc1 = apply_warping_field(vd, w_s2c1)
         vc2d1 = self.G3d(vc1)
-        w_c2d1 = self.warp_generator_c2d(Rd, td, zd, ed)
+        w_c2d1 = self.warp_generator_c2d(Rs, ts, zd, ed)
         vc2d_warped1 = apply_warping_field(vc2d1, w_c2d1)
         vc2d_projected = torch.sum(vc2d_warped1, dim=2)
         xhat1 = self.G2d(vc2d_projected)
 
         # D(vs, es, Rs, ts, zd)
-        w_s2c2 = self.warp_generator_s2c(Rs, ts, zd, es)
+        w_s2c2 = self.warp_generator_s2c(Rs, ts, zs, es)
         vc2 = apply_warping_field(vs, w_s2c2)
         vc2d2 = self.G3d(vc2)
         w_c2d2 = self.warp_generator_c2d(Rs, ts, zd, es)
@@ -1100,9 +1100,7 @@ class Gbase(nn.Module):
         logging.debug(f"es shape:{es.shape}")
         logging.debug(f"zs shape:{zs.shape}")
 
-
         w_s2c = self.warp_generator_s2c(Rs, ts, zs, es)
-
 
         logging.debug(f"vs shape:{vs.shape}") 
         # Warp vs using w_s2c to obtain canonical volume vc
